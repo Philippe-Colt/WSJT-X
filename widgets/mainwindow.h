@@ -42,6 +42,7 @@
 #include "astro.h"
 #include "MessageBox.hpp"
 #include "Network/NetworkAccessManager.hpp"
+#include "ChatProtocol.h"
 
 #define NUM_JT4_SYMBOLS 206                //(72+31)*2, embedded sync
 #define NUM_JT65_SYMBOLS 126               //63 data + 63 sync
@@ -95,6 +96,8 @@ class SampleDownloader;
 class MultiSettings;
 class EqualizationToolsDialog;
 class DecodedText;
+class ChatWidget;
+class QDockWidget;
 
 class MainWindow
   : public MultiGeometryWidget<3, QMainWindow>
@@ -341,6 +344,13 @@ private slots:
                          , bool fast_mode, quint32 tr_period, quint32 rx_df, QString const& dx_call
                          , QString const& dx_grid, bool generate_messages);
   void callSandP2(int nline);
+  void onChatSendRequested(const QString &targetId, const QString &text);
+  void onChatBroadcastRequested(const QString &targetId, const QString &text);
+  void onChatDirectSendRequested(const QString &targetId, const QString &text);
+  void onChatDirectTx(int totalSymbols, int numFragments);
+  void onChatDirectTxDone();
+  void onChatHaltRequested();
+  void on_actionHFChat_triggered();
 
 private:
   Q_SIGNAL void initializeAudioOutputStream (QAudioDeviceInfo,
@@ -782,6 +792,13 @@ private:
   QByteArray m_geometryNoControls;
   QVector<double> m_phaseEqCoefficients;
   bool m_block_udp_status_updates;
+
+  // HF Chat
+  ChatProtocol *m_chatProtocol;
+  ChatWidget *m_chatWidget;
+  QDockWidget *m_chatDock;
+  bool m_chatTxActive {false};  // true pendant émission directe chat
+  bool m_chatMode {true};       // HF Chat mode: hide QSO controls
 
   //---------------------------------------------------- private functions
   void readSettings();

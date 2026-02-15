@@ -8,6 +8,7 @@
 #include <functional>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <algorithm>
 #include <fftw3.h>
 #include <QApplication>
@@ -37,6 +38,7 @@
 #include <QAction>
 #include <QButtonGroup>
 #include <QActionGroup>
+#include <QDockWidget>
 #include <QSplashScreen>
 #include <QUdpSocket>
 #include <QAbstractItemView>
@@ -88,6 +90,8 @@
 #include "FoxLogWindow.hpp"
 #include "CabrilloLogWindow.hpp"
 #include "ExportCabrillo.h"
+#include "ChatWidget.h"
+#include "ChatProtocol.h"
 #include "ui_mainwindow.h"
 #include "moc_mainwindow.cpp"
 #include "Logger.hpp"
@@ -454,7 +458,10 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
         this}},
   m_psk_Reporter {&m_config, QString {"WSJT-X v" + version () + " " + m_revision}.simplified ()},
   m_manual {&m_network_manager},
-  m_block_udp_status_updates {false}
+  m_block_udp_status_updates {false},
+  m_chatProtocol {nullptr},
+  m_chatWidget {nullptr},
+  m_chatDock {nullptr}
 {
   ui->setupUi(this);
   setUnifiedTitleAndToolBarOnMac (true);
@@ -616,6 +623,33 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
            , &m_WSPR_band_hopping, &WSPRBandHopping::show_dialog);
   connect (ui->sbTxPercent, static_cast<void (QSpinBox::*) (int)> (&QSpinBox::valueChanged)
            , &m_WSPR_band_hopping, &WSPRBandHopping::set_tx_percent);
+
+  // HF Chat setup
+  m_chatProtocol = new ChatProtocol(this);
+  m_chatWidget = new ChatWidget;
+  m_chatWidget->setProtocol(m_chatProtocol);
+
+  m_chatDock = new QDockWidget(tr("HF Chat"), this);
+  m_chatDock->setObjectName("ChatDock");
+  m_chatDock->setWidget(m_chatWidget);
+  m_chatDock->setAllowedAreas(Qt::RightDockWidgetArea);
+  addDockWidget(Qt::RightDockWidgetArea, m_chatDock);
+  m_chatDock->show();
+
+  // Add to View menu
+  auto chatAction = new QAction(tr("HF Chat"), this);
+  chatAction->setCheckable(true);
+  chatAction->setChecked(true);
+  ui->menuView->addAction(chatAction);
+  connect(chatAction, &QAction::toggled, m_chatDock, &QDockWidget::setVisible);
+  connect(m_chatDock, &QDockWidget::visibilityChanged, chatAction, &QAction::setChecked);
+
+  // Chat signal connections
+  connect(m_chatWidget, &ChatWidget::sendRequested, this, &MainWindow::onChatSendRequested);
+  connect(m_chatWidget, &ChatWidget::broadcastRequested, this, &MainWindow::onChatBroadcastRequested);
+  connect(m_chatWidget, &ChatWidget::directSendRequested, this, &MainWindow::onChatDirectSendRequested);
+  connect(m_chatWidget, &ChatWidget::haltRequested, this, &MainWindow::onChatHaltRequested);
+  connect(m_chatProtocol, &ChatProtocol::directTxReady, this, &MainWindow::onChatDirectTx);
 
   on_EraseButton_clicked ();
 
@@ -824,7 +858,7 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
 
   // set up configurations menu
   connect (m_multi_settings, &MultiSettings::configurationNameChanged, [this] (QString const& name) {
-      if ("Default" != name) {
+      if ("Default" != name && !m_chatMode) {
         config_label.setText (name);
         config_label.show ();
       }
@@ -912,6 +946,81 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
     m_score=0;
     read_log();
   }
+
+  // ── HF Chat mode: hide unnecessary WSJT-X controls ──────────────
+  // (must be after readSettings which calls restoreState)
+
+  // Control buttons
+  ui->logQSOButton->hide();
+  ui->DecodeButton->hide();
+  ui->autoButton->hide();
+  ui->stopTxButton->hide();
+  ui->tuneButton->hide();
+
+  // DX controls (entire container)
+  ui->DX_controls_widget->hide();
+
+  // QSO controls
+  ui->txFirstCheckBox->hide();
+  ui->pbR2T->hide();
+  ui->pbT2R->hide();
+  ui->rptSpinBox->hide();
+  ui->cbAutoSeq->hide();
+  ui->cbCQonly->hide();
+  ui->respondComboBox->hide();
+  ui->cbTx6->hide();
+  ui->genStdMsgsPushButton->hide();
+
+  // Tx1-Tx6 tab panel
+  ui->tabWidget->hide();
+
+  // Mode buttons
+  ui->houndButton->hide();
+  ui->ft8Button->hide();
+  ui->ft4Button->hide();
+  ui->msk144Button->hide();
+  ui->q65Button->hide();
+  ui->jt65Button->hide();
+
+  // Mode controls
+  ui->sbSubmode->hide();
+  ui->syncSpinBox->hide();
+  ui->sbMaxDrift->hide();
+  ui->sbCQTxFreq->hide();
+  ui->cbCQTx->hide();
+  ui->cbRxAll->hide();
+  ui->cbShMsgs->hide();
+  ui->cbFast9->hide();
+  ui->pbBestSP->hide();
+  ui->measure_check_box->hide();
+  // controls_stack_widget NOT hidden (contains QSO_controls with Tx/Rx freq)
+  ui->opt_controls_stack->hide();
+
+  // Band selector and dial frequency
+  ui->bandComboBox->hide();
+  ui->readFreq->hide();
+  ui->labDialFreq->hide();
+
+  // Status bar: hide config name label
+  config_label.hide();
+
+  // Compact grid: remove stretch from empty columns
+  ui->gridLayout_5->setColumnStretch(4, 0);
+  ui->gridLayout_5->setColumnStretch(5, 0);
+  ui->gridLayout_5->setColumnStretch(6, 0);
+
+  // Force FT8 mode and show chat dock at right (override saved state)
+  on_actionFT8_triggered();
+  if (m_chatDock) {
+    addDockWidget(Qt::RightDockWidgetArea, m_chatDock);
+    m_chatDock->show();
+    QTimer::singleShot(200, this, [this]() {
+      int half = width() / 2;
+      resizeDocks({m_chatDock}, {half}, Qt::Horizontal);
+    });
+  }
+  // ── End HF Chat mode ────────────────────────────────────────────
+
   m_audioThread.start (m_audioThreadPriority);
 
 #ifdef WIN32
@@ -1108,15 +1217,7 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
 
 void MainWindow::not_GA_warning_message ()
 {
-  if(m_config.my_callsign()=="K1JT" or m_config.my_callsign()=="W2ZQ") return;
-  MessageBox::critical_message (this,
-                                "This is a pre-release version of WSJT-X " + version (false) + " made\n"
-                                "available for testing purposes.  By design it will\n"
-                                "be nonfunctional after October 30, 2024.");
-  auto now = QDateTime::currentDateTimeUtc ();
-  if (now >= QDateTime {{2024, 10, 30}, {23, 59, 59, 999}, Qt::UTC}) {
-    Q_EMIT finished ();
-  }
+  // Expiration check removed for local modified build
 }
 
 void MainWindow::initialize_fonts ()
@@ -1217,6 +1318,7 @@ void MainWindow::writeSettings()
   m_settings->setValue ("FoxLogDisplayed", m_foxLogWindow && m_foxLogWindow->isVisible ());
   m_settings->setValue ("ContestLogDisplayed", m_contestLogWindow && m_contestLogWindow->isVisible ());
   m_settings->setValue ("ActiveStationsDisplayed", m_ActiveStationsWidget && m_ActiveStationsWidget->isVisible ());
+  m_settings->setValue ("ChatDisplayed", m_chatDock && m_chatDock->isVisible ());
   m_settings->setValue("RespondCQ",ui->respondComboBox->currentIndex());
   m_settings->setValue("HoundSort",ui->comboBoxHoundSort->currentIndex());
   m_settings->setValue("FoxNlist",ui->sbNlist->value());
@@ -1327,6 +1429,7 @@ void MainWindow::readSettings()
   auto displayFoxLog = m_settings->value ("FoxLogDisplayed", false).toBool ();
   auto displayContestLog = m_settings->value ("ContestLogDisplayed", false).toBool ();
   bool displayActiveStations = m_settings->value ("ActiveStationsDisplayed", false).toBool ();
+  bool displayChat = m_settings->value ("ChatDisplayed", false).toBool ();
   ui->respondComboBox->setCurrentIndex(m_settings->value("RespondCQ",0).toInt());
   ui->comboBoxHoundSort->setCurrentIndex(m_settings->value("HoundSort",3).toInt());
   ui->sbNlist->setValue(m_settings->value("FoxNlist",12).toInt());
@@ -1471,6 +1574,7 @@ void MainWindow::readSettings()
   if (displayFoxLog) on_fox_log_action_triggered ();
   if (displayContestLog) on_contest_log_action_triggered ();
   if(displayActiveStations) on_actionActiveStations_triggered();
+  if(displayChat && m_chatDock) m_chatDock->show();
 }
 
 void MainWindow::checkMSK144ContestType()
@@ -4099,6 +4203,18 @@ void MainWindow::readFromStdout()                             //readFromStdout
       DecodedText decodedtext0 {QString::fromUtf8(line_read.constData())};
       DecodedText decodedtext {QString::fromUtf8(line_read.constData()).remove("TU; ")};
 
+      // HF Chat: intercept free text messages
+      if (m_chatDock && m_chatDock->isVisible()
+          && (m_mode == "FT8" || m_mode == "FT4")
+          && !decodedtext.isTX()
+          && !decodedtext.isStandardMessage()) {
+        auto words = decodedtext.messageWords();
+        if (words.size() >= 2) {
+          QString freeText = words[0].trimmed();
+          m_chatProtocol->processIncoming(freeText);
+        }
+      }
+
       if(m_mode=="FT8" and SpecOp::FOX == m_specOp and
          (decodedtext.string().contains("R+") or decodedtext.string().contains("R-"))) {
         auto for_us  = decodedtext.string().contains(" " + m_config.my_callsign() + " ") or
@@ -4654,6 +4770,24 @@ void MainWindow::guiUpdate()
 
     double fTR=float((ms%int(1000.0*m_TRperiod)))/int(1000.0*m_TRperiod);
 
+    // HF Chat: skip normal TX logic if direct chat TX is active
+    if (m_chatTxActive) {
+      m_btxok = true;  // Empêcher guiUpdate de couper le TX prématurément
+    }
+
+    // HF Chat: inject fragment or echo into Tx5 before TX (mode classique, non direct)
+    if (!m_chatTxActive && m_chatProtocol->hasDataToSend() && g_iptt == 0 && fTR < 0.25) {
+      QString chatTx = m_chatProtocol->nextTxText();
+      if (!chatTx.isEmpty()) {
+        ui->tx5->setCurrentText(chatTx);
+        m_ntx = 5;
+        ui->txrb5->setChecked(true);
+        if (!m_bTxTime) {
+          m_bTxTime = true;
+        }
+      }
+    }
+
     QString txMsg;
     if(m_ntx == 1) txMsg=ui->tx1->text();
     if(m_ntx == 2) txMsg=ui->tx2->text();
@@ -4734,8 +4868,8 @@ void MainWindow::guiUpdate()
   }
 
 
-  // Calculate Tx tones when needed
-  if((g_iptt==1 && m_iptt0==0) || m_restart) {
+  // Calculate Tx tones when needed (skip if chat direct TX — wave[] is pre-filled)
+  if(((g_iptt==1 && m_iptt0==0) || m_restart) && !m_chatTxActive) {
 //----------------------------------------------------------------------
     QByteArray ba;
     QByteArray ba0;
@@ -5055,7 +5189,7 @@ void MainWindow::guiUpdate()
     statusUpdate ();
   }
 
-  if(!m_btxok && m_btxok0 && g_iptt==1) {
+  if(!m_btxok && m_btxok0 && g_iptt==1 && !m_chatTxActive) {
     stopTx();
     if ("1" == m_env.value ("WSJT_TX_BOTH", "0")) {
       m_txFirst = !m_txFirst;
@@ -6902,6 +7036,9 @@ qint64 MainWindow::nWidgets(QString t)
 
 void MainWindow::displayWidgets(qint64 n)
 {
+  // HF Chat mode: only keep TxFreq, RxFreq, HoldTxFreq, ClrAvg, decode actions, AP FT8
+  if (m_chatMode) n = nWidgets("01100000000000100011000010000000000000");
+
   /* See text file "displayWidgets.txt" for widget numbers */
   qint64 j=qint64(1)<<(N_WIDGETS-1);
   bool b;
@@ -7716,7 +7853,7 @@ void MainWindow::switch_mode (Mode mode)
     ui->RxFreqSpinBox->setSingleStep(1);
   }
   bool b=m_mode=="FreqCal";
-  ui->tabWidget->setVisible(!b);
+  if (!m_chatMode) ui->tabWidget->setVisible(!b);
   if(b) {
     ui->DX_controls_widget->setVisible(false);
     ui->rh_decodes_widget->setVisible (false);
@@ -7726,6 +7863,18 @@ void MainWindow::switch_mode (Mode mode)
 
 void MainWindow::WSPR_config(bool b)
 {
+  if (m_chatMode) {
+    // In chat mode, force-hide QSO/DX/WSPR controls regardless of b
+    ui->DX_controls_widget->hide();
+    ui->QSO_controls_widget->show();  // contains Tx/Rx freq, Hold Tx Freq
+    ui->logQSOButton->hide();
+    ui->tabWidget->hide();
+    ui->WSPR_controls_widget->hide();
+    ui->DecodeButton->hide();
+    ui->controls_stack_widget->setCurrentIndex(0);
+    ui->controls_stack_widget->show();
+    return;
+  }
   ui->rh_decodes_widget->setVisible(!b);
   ui->controls_stack_widget->setCurrentIndex (b && m_mode != "Echo" ? 1 : 0);
   ui->QSO_controls_widget->setVisible (!b);
@@ -10871,4 +11020,104 @@ void MainWindow::on_q65Button_clicked()
 void MainWindow::on_jt65Button_clicked()
 {
   on_actionJT65_triggered();
+}
+
+// ---- HF Chat slots ----
+
+void MainWindow::onChatSendRequested(const QString &targetId, const QString &text)
+{
+  m_chatProtocol->sendMessage(targetId, text);
+}
+
+void MainWindow::onChatBroadcastRequested(const QString &targetId, const QString &text)
+{
+  m_chatProtocol->sendBroadcast(targetId, text);
+}
+
+void MainWindow::onChatDirectSendRequested(const QString &targetId, const QString &text)
+{
+  // Lancer l'encodage FT8 direct et remplir foxcom_.wave[]
+  double txFreq = ui->TxFreqSpinBox->value() - m_XIT;
+  m_chatProtocol->sendDirect(targetId, text, txFreq);
+  // Le signal directTxReady sera émis par ChatProtocol → onChatDirectTx
+}
+
+void MainWindow::onChatDirectTx(int totalSymbols, int numFragments)
+{
+  m_chatTxActive = true;
+
+  double totalDuration = numFragments * 15.0;
+
+  qDebug() << "MainWindow::onChatDirectTx: totalSymbols=" << totalSymbols
+           << "numFragments=" << numFragments
+           << "duration=" << totalDuration << "s";
+
+  // Attendre le début du prochain cycle de 15s pour lancer l'émission
+  qint64 ms = QDateTime::currentMSecsSinceEpoch() % 86400000;
+  int mstr = ms % 15000;  // position dans le cycle de 15s actuel
+  int waitMs = (mstr < 200) ? 0 : (15000 - mstr);  // attendre le prochain bord
+
+  qDebug() << "MainWindow::onChatDirectTx: mstr=" << mstr << "waitMs=" << waitMs;
+
+  QTimer::singleShot(waitMs, this, [this, totalSymbols, numFragments, totalDuration]() {
+    if (!m_chatTxActive) return;  // annulé entre-temps
+
+    // Assert PTT
+    g_iptt = 1;
+    m_btxok = true;
+    m_transmitting = true;
+    transmitDisplay(true);
+
+    // Launch Modulator with precomputed wave[] (toneSpacing = -3)
+    Q_EMIT sendMessage("FT8", totalSymbols, 1920.0,
+                       ui->TxFreqSpinBox->value() - m_XIT,
+                       -3.0,  // toneSpacing < 0 → read from foxcom_.wave[]
+                       m_soundOutput, m_config.audio_output_channel(),
+                       true,   // synchronize
+                       false,  // fastMode
+                       99.0,   // dBSNR (no noise)
+                       15);    // TRperiod = 15s
+
+    // Démarrer le suivi des fragments en temps réel
+    m_chatProtocol->startDirectTxTracking();
+
+    // Timer pour détecter la fin de l'émission
+    // Le Modulator ne passe pas à Idle en mode precomputed wave (m_amp forcé à 32767)
+    int endDelayMs = static_cast<int>(totalDuration * 1000) + 2000;
+    QTimer::singleShot(endDelayMs, this, [this]() {
+      if (m_chatTxActive) {
+        onChatDirectTxDone();
+      }
+    });
+  });
+}
+
+void MainWindow::onChatDirectTxDone()
+{
+  qDebug() << "MainWindow::onChatDirectTxDone: emission directe terminee";
+  m_chatTxActive = false;
+  Q_EMIT endTransmitMessage(true);  // Forcer l'arrêt du Modulator
+  stopTx();
+  m_chatProtocol->notifyDirectTxComplete();
+}
+
+void MainWindow::onChatHaltRequested()
+{
+  if (m_chatTxActive) {
+    // Force stop of direct TX
+    m_chatTxActive = false;
+    Q_EMIT endTransmitMessage(true);  // Quick stop of Modulator
+    stopTx();
+    m_chatProtocol->haltTx();
+  } else {
+    m_chatProtocol->haltTx();
+    on_stopTxButton_clicked();
+  }
+}
+
+void MainWindow::on_actionHFChat_triggered()
+{
+  if (m_chatDock) {
+    m_chatDock->setVisible(!m_chatDock->isVisible());
+  }
 }
