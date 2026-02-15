@@ -473,9 +473,12 @@ void ChatProtocol::deliverReceivedMessage()
 {
   if (m_rxPayloads.isEmpty()) return;
 
-  // Réassembler le message
+  // Réassembler le message (FT8 supprime les espaces de fin de chaque fragment)
   QString fullMessage;
   for (const QString &payload : m_rxPayloads) {
+    if (!fullMessage.isEmpty() && !fullMessage.endsWith(' ') && !payload.startsWith(' ')) {
+      fullMessage.append(' ');
+    }
     fullMessage.append(payload);
   }
   fullMessage = fullMessage.trimmed();

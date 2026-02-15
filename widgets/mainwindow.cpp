@@ -4203,15 +4203,16 @@ void MainWindow::readFromStdout()                             //readFromStdout
       DecodedText decodedtext0 {QString::fromUtf8(line_read.constData())};
       DecodedText decodedtext {QString::fromUtf8(line_read.constData()).remove("TU; ")};
 
-      // HF Chat: intercept free text messages
+      // HF Chat: feed all decoded messages to ChatProtocol
+      // (processIncoming filters by header format and target ID)
       if (m_chatDock && m_chatDock->isVisible()
           && (m_mode == "FT8" || m_mode == "FT4")
-          && !decodedtext.isTX()
-          && !decodedtext.isStandardMessage()) {
-        auto words = decodedtext.messageWords();
-        if (words.size() >= 2) {
-          QString freeText = words[0].trimmed();
-          m_chatProtocol->processIncoming(freeText);
+          && !decodedtext.isTX()) {
+        QString raw = decodedtext.string();
+        int pad = raw.indexOf(" ") > 4 ? 2 : 0;
+        QString msg = raw.mid(22 + pad).trimmed();
+        if (!msg.isEmpty()) {
+          m_chatProtocol->processIncoming(msg);
         }
       }
 

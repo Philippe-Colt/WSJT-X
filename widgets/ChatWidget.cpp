@@ -185,7 +185,7 @@ void ChatWidget::onMyIdChanged(const QString &text)
 
 void ChatWidget::onMessageReceived(const QString &senderId, const QString &fullText)
 {
-  appendChat(currentTimeStr() + " " + senderId + ": " + fullText, Qt::white);
+  appendChat(currentTimeStr() + " " + senderId + ": " + fullText, QColor(0, 0, 200));
 }
 
 void ChatWidget::onMessageSentOk(const QString &targetId)
